@@ -2,84 +2,113 @@ import math
 
 
 class Pipeline:
-    def __init__(self, input: str):
-        self.score_model = [30, -30]
+    PAD_ID = 2
+    UNKNOWN_ID = 3
+
+    def __init__(self, text: str, labels=None):
         self.word_to_id = {"fantastic": 0, "awful": 1}
-        self.input = input
-        self.logger(
-            "initialization of the pipeline is complete", "__init__ (constructor)"
-        )
+        self.score_model = {
+            0: 3,
+            1: -3,
+            self.PAD_ID: 0,
+            self.UNKNOWN_ID: 0,
+        }
+        self.input = text.strip()
+        # Logit order is always [negative score, positive score].
+        self.labels = ["negative", "positive"] if labels is None else list(labels)
 
-    def run(self):
-        # remove spaces:
-        self.input.strip()
-        self.logger("trailing spaces removed", "run")
+    def tokenize(self):
+        return [
+            self.word_to_id.get(word, self.UNKNOWN_ID)
+            for word in self.input.lower().split()
+        ]
 
-        # split from spaces
-        list_of_input_words = self.input.split()
-        self.logger(
-            "input string converted into a list of words, separated by spaces", "run"
-        )
-
-        # get the logits for both scores
+    def run(self, token_ids):
         sentiment_score = 0
-        for word in list_of_input_words:
-            index_of_word = self.word_to_id.get(word, -1)
-            if index_of_word >= 0:
-                score = self.score_model[index_of_word]
-                sentiment_score += score
-            semantic_not = "not " if index_of_word < 0 else ""
-            self.logger(
-                f"word is '{word}', is {semantic_not}present in the score model.",
-                "run",
-            )
-        logits = {"positive": sentiment_score, "negative": -sentiment_score}
-        self.logger(f"computed the logits: {logits}", "run")
+        visited_positions = 0
 
-        return logits
+        for token_id in token_ids:
+            visited_positions += 1
+            sentiment_score += self.score_model[token_id]
 
-    def softmax(self, logits, key, denominator, M):
-        numerator = math.e ** (logits[key] - M)
-        return numerator / denominator
+        logits = [-sentiment_score, sentiment_score]
+        return logits, visited_positions
 
     def apply_stable_softmax(self, logits):
-        M = max(v for v in logits.values())
-        denominator = sum(math.e ** (v - M) for v in logits.values())
-        positive_label_softmax = self.softmax(logits, "positive", denominator, M)
-        negative_label_softmax = self.softmax(logits, "negative", denominator, M)
+        maximum = max(logits)
+        exponentials = [math.exp(value - maximum) for value in logits]
+        denominator = sum(exponentials)
 
-        self.logger(
-            f"positive label softmax = {positive_label_softmax}", "apply_stable_softmax"
-        )
-        self.logger(
-            f"negative label softmax = {negative_label_softmax}", "apply_stable_softmax"
-        )
+        return [value / denominator for value in exponentials]
 
-        return (
-            "positive"
-            if positive_label_softmax >= negative_label_softmax
-            else "negative"
-        )
+    def execute_pipeline(self, pad_count=0):
+        token_ids = self.tokenize() + [self.PAD_ID] * pad_count
+        logits, visited_positions = self.run(token_ids)
+        probabilities = self.apply_stable_softmax(logits)
 
-    def execute_pipeline(self):
-        self.logger("execution of the pipeline started", "execute_pipeline")
-        logits = self.run()
-        label_output = self.apply_stable_softmax(logits)
+        # On a tie, choose index 1: positive with the correct mapping.
+        predicted_index = 1 if logits[1] >= logits[0] else 0
 
-        self.logger(
-            f"the output label predicted is: '{label_output}' for the input: '{self.input}'",
-            "execute_pipeline",
-        )
-
-    def logger(self, log: str, method: str):
-        print(f"method:- {method} ===> '{log}'")
+        return {
+            "token_ids": token_ids,
+            "logits": logits,
+            "probabilities": probabilities,
+            "predicted_index": predicted_index,
+            "label": self.labels[predicted_index],
+            "visited_positions": visited_positions,
+        }
 
 
-print()
-Pipeline("the movie was fantastic").execute_pipeline()
-print()
-Pipeline("the movie was awful").execute_pipeline()
-print()
-Pipeline("not fantastic").execute_pipeline()
-print()
-Pipeline("fantastic awful").execute_pipeline()
+def test_positive_label(result):
+    """Check both the winning index and its meaning."""
+    assert result["predicted_index"] == 1, "Wrong winning index"
+    assert result["label"] == "positive", "Wrong label mapping"
+
+
+# 1A: Basic examples.
+for text in [
+    "the movie was fantastic",
+    "the movie was awful",
+    "not fantastic",
+]:
+    result = Pipeline(text).execute_pipeline()
+    print(f"{text!r}: {result}")
+
+
+# 1B, part 1: Deliberately reverse the label mapping.
+correct = Pipeline("fantastic").execute_pipeline()
+broken = Pipeline(
+    "fantastic",
+    labels=["positive", "negative"],
+).execute_pipeline()
+
+assert correct["logits"] == broken["logits"]
+assert correct["probabilities"] == broken["probabilities"]
+
+test_positive_label(correct)
+
+try:
+    test_positive_label(broken)
+except AssertionError as error:
+    print(f"\nCaught the deliberate bug: {error}")
+else:
+    raise AssertionError("The test failed to detect the reversed mapping")
+
+
+# 1B, part 2: Same numeric output, more positions processed.
+pipeline = Pipeline("fantastic")
+original = pipeline.execute_pipeline()
+padded = pipeline.execute_pipeline(pad_count=10)
+
+assert original["logits"] == padded["logits"]
+assert original["probabilities"] == padded["probabilities"]
+assert original["label"] == padded["label"]
+assert padded["visited_positions"] == original["visited_positions"] + 10
+
+print("\nPadding comparison:")
+for name, result in [("Original", original), ("Padded", padded)]:
+    print(
+        f"{name}: logits={result['logits']}, "
+        f"label={result['label']}, "
+        f"visited_positions={result['visited_positions']}"
+    )
